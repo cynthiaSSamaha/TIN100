@@ -152,7 +152,7 @@ async def chat(req: ChatRequest):
         print("Calling OpenAI chat...")
         response = openai_client.chat.completions.create(
             model="gpt-5-mini",
-            max_completion_tokens=500,  
+            max_completion_tokens=3000,  
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
