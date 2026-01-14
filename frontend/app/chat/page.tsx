@@ -12,6 +12,7 @@ export default function ChatPage() {
         "Velkommen. Still et spørsmål om emner, karakterer eller regelverk ved NMBU.",
     },
   ]);
+
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -25,36 +26,37 @@ export default function ChatPage() {
     const text = input.trim();
     if (!text || loading) return;
 
-    const nextMessages: Msg[] = [...messages, { role: "user", content: text }];
-
-    setMessages(nextMessages);
+    // 1) show the user message immediately
+    setMessages((prev) => [...prev, { role: "user", content: text }]);
     setInput("");
     setLoading(true);
 
     try {
-      const res = await fetch("/api/chat", {
+      // 2) Call the PYTHON backend directly
+      const res = await fetch("http://127.0.0.1:8000/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: nextMessages }),
+        // backend expects: { query: "..." }
+        body: JSON.stringify({ query: text }),
       });
 
-      // Robust parsing so we don't crash on empty/non-JSON responses
       const raw = await res.text();
       let data: any = {};
       try {
         data = raw ? JSON.parse(raw) : {};
       } catch {
-        throw new Error(`API returned non-JSON: ${raw}`);
+        throw new Error(`Backend returned non-JSON: ${raw}`);
       }
 
       if (!res.ok) {
-        throw new Error(data?.error || `API error (${res.status})`);
+        throw new Error(data?.error || `Backend error (${res.status})`);
       }
 
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: data.reply ?? "Tomt svar fra API." },
-      ]);
+      // backend returns: { answer: "..." }
+      const answer = data?.answer ?? "Tomt svar fra backend.";
+
+      // 3) show assistant reply
+      setMessages((prev) => [...prev, { role: "assistant", content: answer }]);
     } catch (e) {
       console.error(e);
       setMessages((prev) => [
@@ -62,7 +64,7 @@ export default function ChatPage() {
         {
           role: "assistant",
           content:
-            "Det oppstod en feil ved henting av svar. Vennligst prøv igjen.",
+            "Det oppstod en feil ved henting av svar. Kontroller at backend kjører på http://127.0.0.1:8000 og prøv igjen.",
         },
       ]);
     } finally {
@@ -141,6 +143,3 @@ export default function ChatPage() {
     </div>
   );
 }
-
-
-
