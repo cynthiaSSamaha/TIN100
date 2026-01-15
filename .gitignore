@@ -1,2 +1,4 @@
 .env.fredric
 .venv
+backend/.env
+backend/.venv

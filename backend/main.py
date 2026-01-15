@@ -26,7 +26,11 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 # -------------------------
 # 2) Create clients
 # -------------------------
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+openai_client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    timeout=45.0,   # prevents hanging forever
+)
+
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # -------------------------
@@ -35,9 +39,8 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
 
 # -------------------------
-# 4) CORS (lets browser call backend)
+# 4) CORS
 # -------------------------
-# If your frontend uses another port (3001, 3002), add it here too.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -52,7 +55,7 @@ app.add_middleware(
 )
 
 # -------------------------
-# 5) Request / Response schema
+# 5) Schemas
 # -------------------------
 class ChatRequest(BaseModel):
     query: str
@@ -62,85 +65,114 @@ class ChatResponse(BaseModel):
 
 
 # -------------------------
-# 6) System prompt (your rules)
+# 6) Prompts (FIXED)
 # -------------------------
 SYSTEM_PROMPT = (
-    "Du er en profesjonell studieveileder for NMBU. "
-    "Du skal utelukkende basere svarene dine på informasjonen som er hentet fra databasen (context). "
-    "Ikke bruk kunnskap fra andre universiteter eller høgskoler i Norge. "
-    "Svarene skal være formelle, klare og veiledende. "
-    "Unngå spekulasjon og antagelser. "
-    "Hvis databasen ikke gir tilstrekkelig grunnlag for å svare, skal du svare nøyaktig: "
-    "«Jeg har dessverre ikke tilgang på denne informasjonen.»"
+    "Du er en profesjonell studieveileder for NMBU.\n\n"
+    "Du skal KUN bruke informasjonen som finnes i Context.\n"
+    "IKKE bruk annen kunnskap.\n\n"
+    "Hvis Context ikke inneholder tilstrekkelig informasjon til å svare på spørsmålet, "
+    "skal du SVARE EKSAKT MED:\n"
+    "«Jeg har dessverre ikke tilgang på denne informasjonen.»\n\n"
+    "IKKE gi tomt svar.\n"
+    "IKKE si at du er usikker.\n"
+    "Svar alltid med tekst."
 )
 
 FALLBACK = "Jeg har dessverre ikke tilgang på denne informasjonen."
 
 
 # -------------------------
-# Optional: root endpoint (nice for testing)
+# Root (test)
 # -------------------------
 @app.get("/")
 def root():
-    return {"status": "ok", "hint": "Open /docs or POST /chat"}
+    return {"status": "ok", "hint": "POST /chat"}
 
 
 # -------------------------
-# 7) Main endpoint: POST /chat
+# Main endpoint
 # -------------------------
 @app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+async def chat(req: ChatRequest):
+    print("=== CHAT START ===")
+    print("Query:", repr(req.query))
+
     try:
         query = (req.query or "").strip()
         if not query:
+            print("Empty query → fallback")
             return {"answer": FALLBACK}
 
         # -------------------------
-        # Step A: Make embedding
+        # A) Embedding
         # -------------------------
+        print("Creating embedding...")
         embedding = openai_client.embeddings.create(
             model="text-embedding-3-small",
-            input=query
+            input=query,
         ).data[0].embedding
+        print("Embedding OK")
 
         # -------------------------
-        # Step B: Retrieve context from Supabase
+        # B) Supabase retrieval
         # -------------------------
-        # If the RPC function is missing or fails, we do NOT crash.
+        print("Querying Supabase RPC...")
         try:
             result = supabase.rpc(
                 "match_embeddings",
-                {"query_embedding": embedding, "match_count": 5}
+                {
+                    "query_embedding": embedding,
+                    "match_count": 5,
+                },
             ).execute()
             rows = result.data or []
-        except Exception:
+            print(f"RPC returned {len(rows)} rows")
+        except Exception as e:
+            print("RPC error:", e)
             rows = []
 
-        # IMPORTANT:
-        # Your RPC must return a column called "text" for this to work.
-        # If your column is named differently (e.g. "content"), change row.get("text") below.
-        context = "\n".join((row.get("text") or "") for row in rows).strip()
+        # -------------------------
+        # C) Build context
+        # -------------------------
+        context_chunks = []
+        for row in rows:
+            chunk = row.get("text") or row.get("content") or ""
+            if chunk.strip():
+                context_chunks.append(chunk.strip())
+
+        context = "\n\n".join(context_chunks)
 
         if not context:
-            # No retrieved info => no guessing
+            print("No context found → fallback")
             return {"answer": FALLBACK}
 
-        # -------------------------
-        # Step C: Ask OpenAI using ONLY the context
-        # -------------------------
-        # NOTE: gpt-5-mini does NOT allow temperature=0 here, so we omit temperature.
+        print(f"Context length: {len(context)} chars")
+
+        print("Calling OpenAI chat...")
         response = openai_client.chat.completions.create(
             model="gpt-5-mini",
+            max_completion_tokens=3000,  
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Context:\n{context}\n\nSpørsmål:\n{query}"}
+                {
+                    "role": "user",
+                    "content": f"Context:\n{context}\n\nSpørsmål:\n{query}",
+                },
             ],
         )
 
-        answer = (response.choices[0].message.content or "").strip()
+        raw_answer = response.choices[0].message.content
+        print("RAW MODEL OUTPUT repr:", repr(raw_answer))
+
+        answer = (raw_answer or "").strip()
+        print("Chat completed")
+
         return {"answer": answer or FALLBACK}
 
-    except Exception:
-        # Never crash the server in production — return safe fallback
+    except Exception as e:
+        print("Unhandled error:", e)
         return {"answer": FALLBACK}
 
+    finally:
+        print("=== CHAT END ===")
